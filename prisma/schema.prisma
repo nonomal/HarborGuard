@@ -1,0 +1,80 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "debian-openssl-3.0.x", "debian-openssl-1.1.x", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Image {
+  id          String   @id @default(cuid())
+  name        String   // e.g. "nginx"
+  tag         String   // e.g. "1.27"
+  registry    String?  // e.g. "ghcr.io", "docker.io"
+  digest      String   @unique // sha256:...
+  platform    String?  // e.g. "linux/amd64"
+  sizeBytes   BigInt?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  scans       Scan[]
+
+  @@index([name, tag])
+  @@index([registry, name, tag])
+  @@index([digest])
+  @@map("images")
+}
+
+model Scan {
+  id             String        @id @default(cuid())
+  requestId      String        @unique // e.g. "20250813-145041-8b11d0de"
+  imageId        String
+  image          Image         @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  startedAt      DateTime
+  finishedAt     DateTime?
+  sizeBytes      BigInt?
+  status         ScanStatus    @default(RUNNING)
+  source         String?       // 'local' or 'registry' to track image source
+  
+  // Scanner outputs stored as JSON
+  trivy          Json?
+  grype          Json?
+  syft           Json?
+  dockle         Json?
+  osv            Json?
+  dive           Json?         // layer analysis output from `dive`
+  metadata       Json?         // output from `skopeo inspect`
+  
+  // Scan metadata
+  reportsDir     String?       // where files were written in the container
+  scannerVersions Json?        // versions of tools used
+  scanConfig     Json?         // scan parameters/configuration
+  errorMessage   String?       // error details if failed
+  
+  // Computed/aggregated fields for quick access
+  vulnerabilityCount Json?     // { "critical": 0, "high": 5, "medium": 10, "low": 20 }
+  riskScore          Int?      // computed risk score 0-100
+  complianceScore    Json?     // compliance results summary
+  
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([requestId])
+  @@index([status])
+  @@index([startedAt])
+  @@index([imageId])
+  @@map("scans")
+}
+
+enum ScanStatus {
+  RUNNING
+  SUCCESS
+  PARTIAL
+  FAILED
+  CANCELLED
+}

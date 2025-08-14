@@ -1,0 +1,449 @@
+"use client"
+
+import * as React from "react"
+import { useParams } from "next/navigation"
+import { useEffect, useState } from "react"
+import {
+  IconPackage,
+  IconBug,
+  IconShield,
+  IconExternalLink,
+  IconSearch,
+  IconSortAscending,
+  IconSortDescending,
+} from "@tabler/icons-react"
+
+import { AppSidebar } from "@/components/app-sidebar"
+import { SiteHeader } from "@/components/site-header"
+import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import {
+  SidebarInset,
+  SidebarProvider,
+} from "@/components/ui/sidebar"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { Input } from "@/components/ui/input"
+import { useScans } from "@/hooks/useScans"
+
+interface LibraryVulnerability {
+  id: string
+  severity: string
+  description: string
+  installedVersion: string
+  fixedVersion?: string
+  cvss?: number
+  scanId: string
+  imageName: string
+  imageTag: string
+  references: string[]
+}
+
+export default function LibraryDetailsPage() {
+  const params = useParams()
+  const libraryName = decodeURIComponent(params.name as string)
+  const { scans, loading } = useScans()
+  
+  const [search, setSearch] = useState("")
+  const [sortField, setSortField] = useState<string>("severity")
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc")
+
+  const vulnerabilities = React.useMemo(() => {
+    if (!scans || scans.length === 0) return []
+
+    const vulns: LibraryVulnerability[] = []
+
+    scans.forEach(scan => {
+      // Process Trivy results
+      const trivyResults = scan.scannerReports?.trivy
+      if (trivyResults?.Results) {
+        trivyResults.Results.forEach(result => {
+          result.Vulnerabilities?.forEach(vuln => {
+            if (vuln.PkgName === libraryName) {
+              vulns.push({
+                id: vuln.VulnerabilityID,
+                severity: vuln.Severity,
+                description: vuln.Description || vuln.Title || '',
+                installedVersion: vuln.InstalledVersion,
+                fixedVersion: vuln.FixedVersion,
+                cvss: vuln.CVSS?.nvd?.V3Score || vuln.CVSS?.redhat?.V3Score,
+                scanId: scan.id.toString(),
+                imageName: scan.imageName || scan.image.split(':')[0] || 'unknown',
+                imageTag: scan.image.split(':')[1] || 'latest',
+                references: vuln.References || []
+              })
+            }
+          })
+        })
+      }
+
+      // Process Grype results
+      const grypeResults = scan.scannerReports?.grype
+      if (grypeResults?.matches) {
+        grypeResults.matches.forEach(match => {
+          if (match.artifact.name === libraryName) {
+            vulns.push({
+              id: match.vulnerability.id,
+              severity: match.vulnerability.severity?.toUpperCase() || 'UNKNOWN',
+              description: match.vulnerability.description || '',
+              installedVersion: match.artifact.version,
+              fixedVersion: match.vulnerability.fix?.versions?.[0],
+              cvss: match.vulnerability.cvss?.[0]?.metrics?.baseScore,
+              scanId: scan.id.toString(),
+              imageName: scan.imageName || scan.image.split(':')[0] || 'unknown',
+              imageTag: scan.image.split(':')[1] || 'latest',
+              references: match.vulnerability.urls || []
+            })
+          }
+        })
+      }
+    })
+
+    // Deduplicate by vulnerability ID while keeping scan context
+    const uniqueVulns = Array.from(
+      new Map(vulns.map(v => [`${v.id}-${v.scanId}`, v])).values()
+    )
+
+    return uniqueVulns
+  }, [scans, libraryName])
+
+  const filteredVulnerabilities = React.useMemo(() => {
+    let filtered = vulnerabilities.filter(vuln =>
+      vuln.id.toLowerCase().includes(search.toLowerCase()) ||
+      vuln.description.toLowerCase().includes(search.toLowerCase()) ||
+      vuln.severity.toLowerCase().includes(search.toLowerCase()) ||
+      vuln.imageName.toLowerCase().includes(search.toLowerCase())
+    )
+
+    return filtered.sort((a, b) => {
+      let aValue: any, bValue: any
+
+      switch (sortField) {
+        case "severity":
+          const severityWeight = (s: string) => {
+            switch (s.toLowerCase()) {
+              case "critical": return 4
+              case "high": return 3
+              case "medium": return 2
+              case "low": return 1
+              default: return 0
+            }
+          }
+          aValue = severityWeight(a.severity)
+          bValue = severityWeight(b.severity)
+          break
+        case "cvss":
+          aValue = a.cvss || 0
+          bValue = b.cvss || 0
+          break
+        case "id":
+          aValue = a.id
+          bValue = b.id
+          break
+        case "image":
+          aValue = `${a.imageName}:${a.imageTag}`
+          bValue = `${b.imageName}:${b.imageTag}`
+          break
+        default:
+          return 0
+      }
+
+      if (sortOrder === "asc") {
+        return aValue > bValue ? 1 : -1
+      } else {
+        return aValue < bValue ? 1 : -1
+      }
+    })
+  }, [vulnerabilities, search, sortField, sortOrder])
+
+  const handleSort = (field: string) => {
+    if (sortField === field) {
+      setSortOrder(sortOrder === "asc" ? "desc" : "asc")
+    } else {
+      setSortField(field)
+      setSortOrder("desc")
+    }
+  }
+
+  const getSeverityColor = (severity: string) => {
+    switch (severity.toLowerCase()) {
+      case "critical":
+        return "destructive"
+      case "high":
+        return "destructive"
+      case "medium":
+        return "secondary"
+      case "low":
+        return "outline"
+      default:
+        return "outline"
+    }
+  }
+
+  const breadcrumbs = [
+    { label: "Dashboard", href: "/" },
+    { label: "Library", href: "/library" },
+    { label: libraryName }
+  ]
+
+  // Calculate statistics
+  const stats = React.useMemo(() => {
+    const severityCounts = vulnerabilities.reduce((acc, vuln) => {
+      const severity = vuln.severity.toLowerCase()
+      acc[severity] = (acc[severity] || 0) + 1
+      return acc
+    }, {} as Record<string, number>)
+
+    const affectedImages = new Set(vulnerabilities.map(v => `${v.imageName}:${v.imageTag}`)).size
+    const fixableCount = vulnerabilities.filter(v => v.fixedVersion).length
+
+    return {
+      total: vulnerabilities.length,
+      critical: severityCounts.critical || 0,
+      high: severityCounts.high || 0,
+      medium: severityCounts.medium || 0,
+      low: severityCounts.low || 0,
+      affectedImages,
+      fixableCount,
+      fixablePercent: vulnerabilities.length > 0 ? Math.round((fixableCount / vulnerabilities.length) * 100) : 0
+    }
+  }, [vulnerabilities])
+
+  if (loading) {
+    return <div className="flex items-center justify-center h-screen">Loading library data...</div>
+  }
+
+  return (
+    <SidebarProvider
+      style={
+        {
+          "--sidebar-width": "calc(var(--spacing) * 72)",
+          "--header-height": "calc(var(--spacing) * 12)",
+        } as React.CSSProperties
+      }
+    >
+      <AppSidebar variant="inset" />
+      <SidebarInset className="flex flex-col flex-grow">
+        <SiteHeader breadcrumbs={breadcrumbs} />
+        <div className="flex flex-1 flex-col">
+          <div className="@container/main flex flex-1 flex-col gap-2 overflow-auto">
+            <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6 px-4 lg:px-6">
+
+              {/* Library Overview */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <IconPackage className="h-5 w-5" />
+                    {libraryName}
+                  </CardTitle>
+                  <CardDescription>
+                    Security analysis for library across all scanned images
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+                    <div className="text-center">
+                      <p className="text-2xl font-bold">{stats.total}</p>
+                      <p className="text-sm text-muted-foreground">Total CVEs</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-2xl font-bold text-red-600">{stats.critical}</p>
+                      <p className="text-sm text-muted-foreground">Critical</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-2xl font-bold text-orange-600">{stats.high}</p>
+                      <p className="text-sm text-muted-foreground">High</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-2xl font-bold text-yellow-600">{stats.medium}</p>
+                      <p className="text-sm text-muted-foreground">Medium</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-2xl font-bold text-blue-600">{stats.low}</p>
+                      <p className="text-sm text-muted-foreground">Low</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-2xl font-bold">{stats.affectedImages}</p>
+                      <p className="text-sm text-muted-foreground">Images</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-2xl font-bold text-green-600">{stats.fixablePercent}%</p>
+                      <p className="text-sm text-muted-foreground">Fixable</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Vulnerabilities Table */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <IconBug className="h-5 w-5" />
+                    Vulnerabilities
+                  </CardTitle>
+                  <CardDescription>
+                    All vulnerabilities found in {libraryName} across scanned images
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-4">
+                    {/* Search Bar */}
+                    <div className="flex items-center gap-4">
+                      <div className="relative flex-1">
+                        <IconSearch className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-4 w-4" />
+                        <Input
+                          placeholder="Search vulnerabilities, CVEs, or images..."
+                          value={search}
+                          onChange={(e) => setSearch(e.target.value)}
+                          className="pl-10"
+                        />
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        {filteredVulnerabilities.length} of {vulnerabilities.length} vulnerabilities
+                      </div>
+                    </div>
+
+                    {/* Table */}
+                    <div className="border rounded-lg">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>
+                              <Button
+                                variant="ghost"
+                                className="h-auto p-0 font-medium"
+                                onClick={() => handleSort("severity")}
+                              >
+                                Severity
+                                {sortField === "severity" && (
+                                  sortOrder === "asc" ? <IconSortAscending className="ml-1 h-4 w-4" /> : <IconSortDescending className="ml-1 h-4 w-4" />
+                                )}
+                              </Button>
+                            </TableHead>
+                            <TableHead>
+                              <Button
+                                variant="ghost"
+                                className="h-auto p-0 font-medium"
+                                onClick={() => handleSort("id")}
+                              >
+                                CVE ID
+                                {sortField === "id" && (
+                                  sortOrder === "asc" ? <IconSortAscending className="ml-1 h-4 w-4" /> : <IconSortDescending className="ml-1 h-4 w-4" />
+                                )}
+                              </Button>
+                            </TableHead>
+                            <TableHead>Description</TableHead>
+                            <TableHead>
+                              <Button
+                                variant="ghost"
+                                className="h-auto p-0 font-medium"
+                                onClick={() => handleSort("cvss")}
+                              >
+                                CVSS Score
+                                {sortField === "cvss" && (
+                                  sortOrder === "asc" ? <IconSortAscending className="ml-1 h-4 w-4" /> : <IconSortDescending className="ml-1 h-4 w-4" />
+                                )}
+                              </Button>
+                            </TableHead>
+                            <TableHead>Versions</TableHead>
+                            <TableHead>
+                              <Button
+                                variant="ghost"
+                                className="h-auto p-0 font-medium"
+                                onClick={() => handleSort("image")}
+                              >
+                                Found In
+                                {sortField === "image" && (
+                                  sortOrder === "asc" ? <IconSortAscending className="ml-1 h-4 w-4" /> : <IconSortDescending className="ml-1 h-4 w-4" />
+                                )}
+                              </Button>
+                            </TableHead>
+                            <TableHead>Actions</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {filteredVulnerabilities.map((vuln, index) => (
+                            <TableRow key={`${vuln.id}-${vuln.scanId}-${index}`}>
+                              <TableCell>
+                                <Badge variant={getSeverityColor(vuln.severity) as any}>
+                                  {vuln.severity}
+                                </Badge>
+                              </TableCell>
+                              <TableCell>
+                                <p className="font-medium font-mono text-sm">{vuln.id}</p>
+                              </TableCell>
+                              <TableCell>
+                                <p className="text-sm max-w-md truncate" title={vuln.description}>
+                                  {vuln.description || 'No description available'}
+                                </p>
+                              </TableCell>
+                              <TableCell>
+                                <Badge variant="outline">
+                                  {vuln.cvss ? vuln.cvss.toFixed(1) : "N/A"}
+                                </Badge>
+                              </TableCell>
+                              <TableCell>
+                                <div className="space-y-1">
+                                  <p className="text-sm"><span className="font-medium">Installed:</span> {vuln.installedVersion}</p>
+                                  {vuln.fixedVersion ? (
+                                    <p className="text-sm"><span className="font-medium">Fixed:</span> {vuln.fixedVersion}</p>
+                                  ) : (
+                                    <Badge variant="secondary" className="text-xs">No fix available</Badge>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <Badge variant="outline" className="text-xs">
+                                  {vuln.imageName}:{vuln.imageTag}
+                                </Badge>
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex items-center gap-2">
+                                  {vuln.references && vuln.references.length > 0 && (
+                                    <Button variant="ghost" size="sm" asChild>
+                                      <a
+                                        href={vuln.references[0]}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        title="View CVE details"
+                                      >
+                                        <IconExternalLink className="h-4 w-4" />
+                                      </a>
+                                    </Button>
+                                  )}
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                    
+                    {filteredVulnerabilities.length === 0 && (
+                      <div className="text-center py-8 text-muted-foreground">
+                        {search ? `No vulnerabilities found matching "${search}"` : `No vulnerabilities found for ${libraryName}`}
+                      </div>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          </div>
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
+  )
+}
